@@ -2,7 +2,7 @@
 ## Overview
 # Metagenomic quality control, assembly, binning and downstream analyses — Code examples
 
-Below are reproducible code examples (command-line, R scripts and small Python helpers) translated to use English comments. Each section includes key commands, example parameters and notes to help you run the pipeline. I kept the same tools and parameters you provided. Confirm software is installed and available in PATH (or run inside appropriate containers/conda environments).
+Below are reproducible code examples (command-line, R scripts and small Python helpers). Each section includes key commands, example parameters and notes to help you run the pipeline. Confirm software is installed and available in PATH (or run inside appropriate containers/conda environments).
 
 ---
 
@@ -75,9 +75,10 @@ semibin auto --contigs megahit_out/final.contigs.fa --bamfiles sample.sorted.bam
 
 MAGScoT scoring and refinement:
 ```bash
-# Score and refine bins with MAGScoT
-magscot score --bins-dir combined_bins --out magscot_scores.tsv --threads 16
-magscot refine --scores magscot_scores.tsv --bins-dir combined_bins --out refined_bins
+MAGScoT_folder="/path/to/MAGScoT"
+cd $MAGScoT_folder/example
+
+Rscript $MAGScoT_folder/MAGScoT.R -i example.contigs_to_bin.tsv --hmm example.hmm
 ```
 
 ---
@@ -85,7 +86,9 @@ magscot refine --scores magscot_scores.tsv --bins-dir combined_bins --out refine
 ## 4. Genome quality assessment with CheckM2
 ```bash
 # Predict completeness and contamination for bins with CheckM2
-checkm2 predict --input_dir refined_bins --output checkm2_results.tsv --threads 32
+# mags.path: One MAG each line
+time checkm2 predict -i $(cat in.path) -o cm2_in2 -t 30 --tmpdir . --force
+
 # Filter MAGs that meet medium quality or above according to MIMAG:
 # e.g., completeness >= 50% and contamination <= 10%
 awk -F"\t" 'NR==1 || ($3>=50 && $4<=10){print $0}' checkm2_results.tsv > mags_medium_plus.tsv
@@ -115,7 +118,8 @@ dRep dereplicate drep_species_out -g drep_strain_out/dereplicated_genomes/*.fa \
 ## 6. Compare mOTUs to public genomes using dRep
 ```bash
 # Compare your mOTUs to a public reference set (GTDB/SMAG/GEM)
-dRep compare --genomes1 motus/*.fa --genomes2 refs/gtdb_r220/*.fa -o compare_motus_gtdb -p 16
+dRep dereplicate drep_comapre_species_out -g merged_genomes/*.fa \
+  -p 32 -comp 50 -con 10 -sa 0.95
 # Mark mOTU as novel if the best ANI to all references < 95%
 ```
 
@@ -124,10 +128,10 @@ dRep compare --genomes1 motus/*.fa --genomes2 refs/gtdb_r220/*.fa -o compare_mot
 ## 7. Taxonomic annotation and phylogenetic tree (GTDB-Tk + IQ-TREE)
 ```bash
 # Classify genomes with GTDB-Tk using GTDB release R220
-gtdbtk classify_wf --genome_dir motus/ --out_dir gtdbtk_out --cpus 32 --db_dir /path/to/gtdb_r220
+gtdbtk classify_wf --genome_dir motus/ -x fa --out_dir gtdbtk_out --cpus 32 --db_dir /path/to/gtdb_r220
 
 # Build concatenated-marker phylogeny using GTDB-Tk alignments
-ALIGN=gtdbtk_out/marker_alignments/concat.aln
+ALIGN=gtdbtk_out/align/
 
 # Trim alignment gaps with trimAl
 trimal -in $ALIGN -out concat.trim.aln -gt 0.1
@@ -174,40 +178,6 @@ PY
 
 ---
 
-## 10. Correlation of BGC density vs corrected genome size (R)
-```r
-# R script: bgc_density_vs_genome_size.R
-library(tidyverse)
-library(ggpubr)
-library(ggpmisc)
-
-# Read metadata: observed_size (bp), completeness (%), contamination (%), bgc_count, phylum
-df <- read_tsv("genomes_metadata.tsv")
-
-# Correct genome size and calculate BGC density (BGCs per bp)
-df <- df %>%
-  mutate(corrected_genome_size = (observed_size * 100 / completeness) - (observed_size * contamination / 100),
-         bgc_density = bgc_count / corrected_genome_size)
-
-# Keep phyla with >= 50 genomes
-df_sub <- df %>% group_by(phylum) %>% filter(n() >= 50) %>% ungroup()
-
-# Plot BGC density vs corrected genome size with LOESS smoothing and Spearman correlation
-p <- ggplot(df_sub, aes(x = corrected_genome_size/1e6, y = bgc_density)) +
-  geom_point(alpha=0.4) +
-  stat_smooth(method="loess", se=TRUE) +
-  facet_wrap(~phylum, scales="free") +
-  stat_cor(method = "spearman")
-
-ggsave("bgc_density_vs_genome_size.png", p, width=12, height=8)
-```
-
-Run:
-```bash
-Rscript bgc_density_vs_genome_size.R
-```
-
----
 
 ## 11. cAMP prediction and clustering (Macrel + Prodigal smORF + CD-HIT with reduced alphabet)
 Run Macrel contigs mode:
@@ -232,83 +202,9 @@ python3 reduce_alphabet.py prodigal_smORFs.faa prodigal_smORFs_reduced.faa
 cd-hit -i prodigal_smORFs_reduced.faa -o cdhit_clusters -c 0.75 -s 0.80 -T 16 -M 16000
 ```
 
-reduce_alphabet.py:
-```python
-#!/usr/bin/env python3
-# reduce_alphabet.py
-# Map standard amino acids into an 8-letter reduced alphabet
-from Bio import SeqIO
-import sys
 
-# Group mapping:
-# [LVIMC] -> A
-# [AG]    -> B
-# [ST]    -> C
-# [FYW]   -> D
-# [EDNQ]  -> E
-# [KR]    -> F
-# [P]     -> G
-# [H]     -> H
-mapping = {}
-for aa in "LVIMC": mapping[aa] = "A"
-for aa in "AG":   mapping[aa] = "B"
-for aa in "ST":   mapping[aa] = "C"
-for aa in "FYW":  mapping[aa] = "D"
-for aa in "EDNQ": mapping[aa] = "E"
-for aa in "KR":   mapping[aa] = "F"
-mapping['P'] = "G"
-mapping['H'] = "H"
 
-def reduce_seq(s):
-    # Map each residue to its reduced symbol; unknowns -> X
-    return ''.join(mapping.get(ch.upper(),'X') for ch in s)
 
-in_f, out_f = sys.argv[1], sys.argv[2]
-with open(out_f, 'w') as out:
-    for rec in SeqIO.parse(in_f, 'fasta'):
-        rec.seq = type(rec.seq)(reduce_seq(str(rec.seq)))
-        SeqIO.write(rec, out, 'fasta')
-```
-
-Select representative sequences per cluster (longest sequence wins; alphabetical tie-breaker).
-
-Compute AMP density per genome:
-- AMP density = number of AMPs / assembled base pairs (per genome). Map clusters back to genome origin to compute.
-
----
-
-## 12. cAMP physicochemical properties (R + Peptides package)
-```r
-# R script: camp_physchem.R
-library(tidyverse)
-library(Peptides)
-library(Biostrings)
-
-# Read peptide fasta using Biostrings
-fasta <- readAAStringSet("camp_representatives.faa")
-df <- tibble(id = names(fasta), seq = as.character(fasta))
-
-# Compute properties: molecular weight, amino acid composition, pI, net charge at pH 7,
-# Boman index, instability index, hydrophobicity
-amps_features <- df %>% rowwise() %>% mutate(
-  mw = mw(seq),
-  pI = pI(seq),
-  net_charge = charge(seq, pH=7.0),
-  boman = boman(seq),
-  instability = instability(seq),
-  hydrophobicity = hydrophobicity(seq)
-) %>% ungroup()
-
-write_tsv(amps_features, "amps_physchem.tsv")
-```
-
-Predict peptide structures with ColabFold (example command when installed locally or via container):
-```bash
-# Use colabfold_batch to predict peptide structures (adjust options as needed)
-colabfold_batch --fasta camp_representatives.faa --outdir colabfold_out --num_relax 0
-```
-
----
 
 ## 13. Compare TEG cAMPs to public AMP databases (MMseqs2)
 ```bash
@@ -320,7 +216,6 @@ mmseqs easy-search camp_db public_db mmseqs_search_res tmpdir --min-seq-id 0.75 
 # Parse results to retain hits with identity >= 75% and E-value <= 1e-5
 ```
 
----
 
 ## 14. CRISPR–Cas system mining (CRISPRCasTyper, align Cas9, build tree)
 ```bash
@@ -427,32 +322,3 @@ pymol pred.pdb 7YME.pdb
 ```
 
 ---
-
-## 17. Statistics and reproducibility (R)
-- Use R v4.3.2 and RStudio for analysis.
-- Plotting libraries: ggplot2, ggpubr, ggpmisc, maps for geographic visualization, ggtukey for compact letter displays.
-- Save sessionInfo to capture package versions and reproducibility metadata.
-
-Example of saving session info:
-```r
-# Save R session info to ensure reproducibility
-writeLines(capture.output(sessionInfo()), "R_sessionInfo.txt")
-```
-
-Notes on plotting:
-- Use scatter, box, violin, heatmap, and raincloud plots as needed.
-- For pairwise tests: use Kruskal-Wallis + Dunn's test with Bonferroni correction.
-- Overlay individual data points on violin/boxplots to display raw data distributions.
-- Use ggtukey to add compact letter displays to plots for multiple comparisons at alpha = 0.05.
-
----
-
-## Included helper scripts (names and brief descriptions)
-- reduce_alphabet.py — Map amino acids to 8-letter reduced alphabet (used prior to CD-HIT).
-- detect_petase_motifs.py — Screen candidate PETase sequences for motif and catalytic residues.
-- bgc_density_vs_genome_size.R — Compute corrected genome sizes, BGC density, Spearman correlation and plot.
-- camp_physchem.R — Compute peptide physicochemical properties using Peptides package.
-
----
-
-If you want these scripts provided as separate downloadable files (with executable headers), or if you prefer a full Snakemake/Nextflow pipeline that wires these steps together for HPC execution, tell me which format you prefer and I will produce those files next.
